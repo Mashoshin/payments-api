@@ -1,65 +1,86 @@
-# CLAUDE.md — payments-api
+# CLAUDE.md — payments
 
-Guidance for working in this repository.
+Гид для агентов по этому репозиторию. Держи его в актуальном состоянии при
+изменении кода.
 
 ## Что это
 
-`payments` — сервис-оркестратор платёжного потока, порт **8081**. Один из трёх
-микросервисов полигона (`payments` → `ledger` → `notifications`). Единственный
-источник правды по требованиям — `SERVICES-SPEC.md` в метарепозитории уровнем выше.
+`payments` — сервис 1 платёжного потока (порт **8081**). Оркестратор: принимает
+платёж, синхронно создаёт проводку в `ledger`, затем отправляет уведомление в
+`notifications`. Это единственный сервис, который вызывает других.
 
-Роль: принимает платёж, **синхронно** создаёт проводку в `ledger`, затем шлёт
-уведомление получателю в `notifications`. `payments` — единственный сервис,
-который ходит к соседям; сам никем не вызывается, кроме клиента.
+Спецификация всего полигона — `../SERVICES-SPEC.md` (раздел «Сервис 1: payments»).
+README.md — пользовательская документация с примерами curl.
 
-## Что умеет
+## Технологии и ограничения
 
-| Метод | Маршрут | Назначение |
-|---|---|---|
-| `GET`  | `/health` | Служебная проверка: `200 {"status":"ok","service":"payments"}` |
-| `POST` | `/payments` | Создать платёж и провести его до конца |
-| `GET`  | `/payments/{id}` | Вернуть платёж; нет такого — `404` |
+- **PHP 8.3+**, **без фреймворков и без composer-зависимостей**. Только stdlib
+  (включая расширение `curl` для исходящих вызовов).
+- Один входной скрипт `public/index.php` с простым роутером.
+- Хранение — JSON-файл `var/storage.json` (карта `id → payment`). Файла нет →
+  пустое хранилище, создаётся при первой записи. Каталог `var/` в `.gitignore`.
+- Деньги — целые числа в **копейках**, никаких float. Валюта одна — `RUB`,
+  в API не передаётся. `amount` всегда строго > 0.
+- Счёт — строка `^acc_[a-z0-9_]+$`.
 
-### Поток `POST /payments`
+## Поток и правила отказов
 
-1. Валидация тела (`400` при нарушении): `from`/`to` соответствуют
-   `^acc_[a-z0-9_]+$`, `from != to`, `amount` — **целое число > 0** (копейки).
-2. Платёж фиксируется со статусом `pending`.
-3. `POST {LEDGER_URL}/entries` с `payment_id, debit=from, credit=to, amount`.
-   Недоступен или ответ не `201` → статус `failed`, клиенту
-   `502 {"error":"ledger unavailable"}` (платёж остаётся в хранилище как `failed`).
-4. `POST {NOTIFICATIONS_URL}/notify` для счёта `to` с сообщением
-   `"Зачисление 1000.00 RUB со счёта acc_vasya"` (сумма из копеек в рубли,
-   два знака). Недоступен → платёж **всё равно успешен**, но
-   `"notification_sent": false` (best effort).
-5. Статус `completed`, ответ клиенту `201` с телом платежа.
+```
+client → POST /payments → [payments :8081]
+                              ├─(1) POST /entries → [ledger :8082]        обязательно
+                              └─(2) POST /notify  → [notifications :8083] best effort
+```
 
-## Архитектура и правила
+1. Сгенерировать `id` (`pay_` + 8 hex), зафиксировать платёж как `pending`.
+2. **ledger `POST /entries`** (`debit=from`, `credit=to`, `amount`, `payment_id`).
+   Недоступен или ответил не `201` → статус `failed`, сохранить, клиенту **502**
+   `{"error":"ledger unavailable"}`.
+3. **notifications `POST /notify`** для счёта `to` с сообщением
+   `"Зачисление <рубли> RUB со счёта <from>"` (сумма из копеек, 2 знака).
+   Недоступен/не `201` → платёж **всё равно** `completed`, но
+   `notification_sent=false`.
+4. Статус `completed`, ответ клиенту **201**.
 
-- **PHP 8.3+, без фреймворков и без composer-зависимостей.** Требуется расширение
-  `curl` (используется для вызова соседей).
-- Вся логика — в одном входном скрипте `public/index.php` с простым роутером.
-  Разбит на секции: HTTP-помощники, хранилище, утилиты предметной области,
-  обработчики маршрутов, роутер. При доработке — сохранять эту структуру,
-  не тащить фреймворк/composer.
-- **Хранилище** — JSON-файл `var/storage.json` (ключ — `id` платежа). Каталог
-  `var/` в `.gitignore`, создаётся при первой записи. Запись атомарная
-  (temp-файл + `rename`).
-- **Деньги** — только целые копейки, никаких float. Форматирование в рубли —
-  через `intdiv`/`%` (см. `kopecksToRubles`), без float-погрешностей.
-- **Идентификаторы** генерирует сервис: `pay_` + 8 hex-символов
-  (`random_bytes`).
-- **Время** — таймзона зафиксирована `Europe/Moscow`, `created_at` в формате ISO 8601
-  (`date('c')`).
-- Формат ответов — всегда JSON. Ошибки: `{"error":"<описание>"}` с кодами
-  `400` / `404` / `502`.
-
-### Конфигурация (env, со значениями по умолчанию)
+## Конфигурация (env)
 
 | Переменная | По умолчанию |
 |---|---|
 | `LEDGER_URL` | `http://localhost:8082` |
 | `NOTIFICATIONS_URL` | `http://localhost:8083` |
+
+## Структура кода
+
+```
+public/index.php                 точка входа + роутер + маппинг исключений на статусы
+src/Payments.php                 оркестрация: create(), find()
+src/Storage.php                  JSON-хранилище (карта id→payment), upsert под flock
+src/HttpClient.php               исходящий POST JSON поверх cURL (status 0 = недоступен)
+src/HttpResponse.php             результат исходящего вызова
+src/Config.php                   адреса соседей из env
+src/Money.php                    копейки → рубли ("1000.00") без float
+src/Validator.php                валидация account/amount
+src/ValidationException.php      → HTTP 400
+src/LedgerUnavailableException.php → HTTP 502
+src/Http.php                     разбор JSON-тела, отправка JSON-ответа
+src/Clock.php                    метка времени ISO 8601 (+03:00)
+```
+
+Маппинг исключений в `index.php`: `ValidationException → 400`,
+`LedgerUnavailableException → 502`, прочее `\Throwable → 500`.
+
+## Ручки
+
+| Метод + путь | Назначение | Успех |
+|---|---|---|
+| `GET /health` | служебная проверка | `200 {"status":"ok","service":"payments"}` |
+| `POST /payments` | создать платёж и провести | `201` с телом платежа |
+| `GET /payments/{id}` | вернуть платёж | `200` / `404` |
+
+`POST /payments` валидация (`400`): формат обоих счетов, `from != to`,
+`amount` — целое > 0.
+
+Тело платежа: `{id, from, to, amount, status, notification_sent, created_at}`,
+`status ∈ {pending, completed, failed}`.
 
 ## Запуск
 
@@ -67,74 +88,68 @@ Guidance for working in this repository.
 php -S localhost:8081 public/index.php
 ```
 
-## Как это протестировать
+Если PHP не в PATH (Homebrew): полный путь, например `/opt/homebrew/opt/php/bin/php`.
 
-Проверить синтаксис:
+## Как протестировать
+
+Синтаксис:
 
 ```bash
-php -l public/index.php
+php -l public/index.php && for f in src/*.php; do php -l "$f"; done
 ```
 
-### Быстрый smoke-тест без соседей
+Полный сквозной тест требует запущенных соседей. `ledger` — соседний репозиторий
+`../ledger-api` (`php -S localhost:8082 public/index.php`). Для `notifications`
+на 8083 достаточно любой заглушки, отвечающей `201` на `POST /notify` (пока сервис
+не реализован).
 
-`payments` работает и без запущенных `ledger`/`notifications` — проверяются
-валидация, роутинг и обработка недоступности зависимостей.
+Smoke-тест (все три сервиса запущены):
 
 ```bash
-php -S localhost:8081 public/index.php &   # запустить сервис
+B=localhost:8081
 
-curl -s localhost:8081/health
+curl -s $B/health
 # → {"status":"ok","service":"payments"}
 
-# Валидация: счёт сам себе + нулевая сумма → 400
-curl -s -X POST localhost:8081/payments -H 'Content-Type: application/json' \
-  -d '{"from":"acc_vasya","to":"acc_vasya","amount":0}'
-# → 400 {"error":"..."}
-
-# ledger не запущен → 502, платёж сохраняется как failed
-curl -s -X POST localhost:8081/payments -H 'Content-Type: application/json' \
+# успешный платёж
+curl -s -X POST $B/payments -H 'Content-Type: application/json' \
   -d '{"from":"acc_vasya","to":"acc_petya","amount":100000}'
-# → 502 {"error":"ledger unavailable"}
+# → 201, status=completed, notification_sent=true
+
+# эффекты: ledger обновлён
+curl -s localhost:8082/accounts/acc_petya/balance   # balance 100000
+curl -s localhost:8082/accounts/acc_vasya/balance   # balance -100000
+
+# получить платёж
+curl -s $B/payments/<id>          # 200 | 404 {"error":"payment not found"}
 ```
 
-### Полный сценарий с заглушками соседей
-
-Пока `ledger` и `notifications` не реализованы, их можно заменить минимальными
-заглушками (любой сервер, отвечающий `201` на `POST /entries` и `POST /notify`).
-Пример на встроенном сервере PHP:
+Проверки валидации (все → `400`):
 
 ```bash
-# ledger-заглушка (порт 8082): всегда 201 на /entries
-cat > /tmp/mock_ledger.php <<'PHP'
-<?php http_response_code(201); header('Content-Type: application/json');
-echo json_encode(['id'=>'ent_test','created_at'=>date('c')]);
-PHP
-php -S localhost:8082 /tmp/mock_ledger.php &
-
-# notifications-заглушка (порт 8083): всегда 201 на /notify
-cat > /tmp/mock_notify.php <<'PHP'
-<?php http_response_code(201); header('Content-Type: application/json');
-echo json_encode(['id'=>'ntf_test','created_at'=>date('c')]);
-PHP
-php -S localhost:8083 /tmp/mock_notify.php &
-
-# payments
-php -S localhost:8081 public/index.php &
-
-# Платёж проходит целиком → 201, status=completed, notification_sent=true
-RESP=$(curl -s -X POST localhost:8081/payments -H 'Content-Type: application/json' \
-  -d '{"from":"acc_vasya","to":"acc_petya","amount":100000}')
-echo "$RESP"
-
-# Получить платёж по id
-ID=$(echo "$RESP" | php -r 'echo json_decode(stream_get_contents(STDIN),true)["id"];')
-curl -s localhost:8081/payments/$ID
+# from == to и amount = 0
+curl -s -X POST $B/payments -H 'Content-Type: application/json' \
+  -d '{"from":"acc_vasya","to":"acc_vasya","amount":0}'
+# дробный amount
+curl -s -X POST $B/payments -H 'Content-Type: application/json' \
+  -d '{"from":"acc_a","to":"acc_b","amount":10.5}'
+# неверный формат счёта
+curl -s -X POST $B/payments -H 'Content-Type: application/json' \
+  -d '{"from":"Acc_A","to":"acc_b","amount":100}'
 ```
 
-Когда реальные `ledger` (8082) и `notifications` (8083) подняты — сценарий тот же,
-плюс сквозной smoke-тест из раздела «Критерий готовности» в `SERVICES-SPEC.md`.
+Отказы зависимостей:
 
-## Вне скоупа v1
+```bash
+# ledger погашен → 502 и платёж failed
+curl -s -X POST $B/payments -H 'Content-Type: application/json' \
+  -d '{"from":"acc_x","to":"acc_y","amount":77700}'
+# → 502 {"error":"ledger unavailable"} (запись в var/storage.json со status=failed)
 
-Проверка баланса (овердрафт разрешён), отмена платежа, идемпотентность повторов,
-комиссии, несколько валют.
+# notifications погашен, ledger жив → 201 completed, notification_sent=false
+```
+
+## Границы (вне скоупа v1)
+
+Проверка достаточности баланса (овердрафт разрешён), отмена платежа,
+идемпотентность повторов, комиссии. Не добавлять без явного тикета.
