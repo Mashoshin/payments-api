@@ -40,24 +40,42 @@ final class Payments
             throw new ValidationException('from and to must differ');
         }
 
+        // Комиссия 1% «сверху», удерживается с отправителя дополнительно к сумме.
+        // Ставка 1% — зашитая константа (инвариант v1), целочисленный ceil(amount/100),
+        // минимум 1 копейка: (amount + 99) div 100. Без float.
+        $fee = intdiv($amount + 99, 100);
+        $total = $amount + $fee;
+
         // 1. Зафиксировать платёж со статусом pending.
         $payment = [
             'id' => 'pay_' . bin2hex(random_bytes(4)),
             'from' => $from,
             'to' => $to,
             'amount' => $amount,
+            'fee' => $fee,
+            'total' => $total,
             'status' => 'pending',
             'notification_sent' => false,
             'created_at' => Clock::now(),
         ];
         $this->storage->save($payment);
 
-        // 2. Проводка в ledger — обязательна.
+        // 2. Проводка в ledger — обязательна. Оба плеча одним запросом (массив):
+        //    сначала перевод, затем комиссия на счёт acc_fee. Запись атомарна на
+        //    стороне ledger — при сбое второго запроса не делаем, «фантома» нет.
         $ledgerResponse = $this->http->postJson($this->config->ledgerUrl . '/entries', [
-            'payment_id' => $payment['id'],
-            'debit' => $from,
-            'credit' => $to,
-            'amount' => $amount,
+            [
+                'payment_id' => $payment['id'],
+                'debit' => $from,
+                'credit' => $to,
+                'amount' => $amount,
+            ],
+            [
+                'payment_id' => $payment['id'],
+                'debit' => $from,
+                'credit' => 'acc_fee',
+                'amount' => $fee,
+            ],
         ]);
 
         if ($ledgerResponse->status !== 201) {
