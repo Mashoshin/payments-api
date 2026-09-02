@@ -13,7 +13,7 @@ namespace Payments;
 final class Validator
 {
     private const ACCOUNT_PATTERN = '/^acc_[a-z0-9_]+$/';
-    private const CLIENT_OID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/';
+    private const CLIENT_OID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/D';
 
     /**
      * Проверить идентификатор счёта.
