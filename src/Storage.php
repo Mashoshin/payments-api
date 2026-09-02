@@ -31,6 +31,24 @@ final class Storage
     }
 
     /**
+     * Найти платёж по ключу идемпотентности — паре (from, client_oid).
+     * Один и тот же client_oid у разных отправителей — разные платежи.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function findByClientOid(string $from, string $clientOid): ?array
+    {
+        foreach ($this->readAll() as $payment) {
+            // Платежи, созданные до появления client_oid, ключа не имеют.
+            if (($payment['from'] ?? null) === $from && ($payment['client_oid'] ?? null) === $clientOid) {
+                return $payment;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Создать/обновить платёж (upsert по ключу id) под эксклюзивной блокировкой.
      *
      * @param array<string, mixed> $payment должен содержать ключ 'id'

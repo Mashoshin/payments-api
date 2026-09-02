@@ -11,6 +11,7 @@ namespace Payments;
  * Маршруты:
  *   GET  /health          — служебная проверка
  *   POST /payments        — создать платёж и провести до конца
+ *                           (идемпотентно по паре from + client_oid)
  *   GET  /payments/{id}   — вернуть платёж
  *
  * Соседи (переопределяются через env):
@@ -19,6 +20,7 @@ namespace Payments;
  */
 
 require __DIR__ . '/../src/ValidationException.php';
+require __DIR__ . '/../src/ConflictException.php';
 require __DIR__ . '/../src/LedgerUnavailableException.php';
 require __DIR__ . '/../src/Validator.php';
 require __DIR__ . '/../src/Clock.php';
@@ -28,6 +30,7 @@ require __DIR__ . '/../src/HttpResponse.php';
 require __DIR__ . '/../src/HttpClient.php';
 require __DIR__ . '/../src/Storage.php';
 require __DIR__ . '/../src/Http.php';
+require __DIR__ . '/../src/CreateResult.php';
 require __DIR__ . '/../src/Payments.php';
 
 $storageFile = __DIR__ . '/../var/storage.json';
@@ -50,10 +53,11 @@ try {
         return;
     }
 
-    // POST /payments
+    // POST /payments — идемпотентно по паре (from, client_oid):
+    // 201 платёж проведён, 200 повтор (вернули существующий).
     if ($method === 'POST' && $path === '/payments') {
-        $payment = $service->create(Http::jsonBody());
-        Http::json(201, $payment);
+        $result = $service->create(Http::jsonBody());
+        Http::json($result->status, $result->payment);
         return;
     }
 
@@ -72,6 +76,8 @@ try {
     Http::json(404, ['error' => 'not found']);
 } catch (ValidationException $e) {
     Http::json(400, ['error' => $e->getMessage()]);
+} catch (ConflictException $e) {
+    Http::json(409, ['error' => $e->getMessage()]);
 } catch (LedgerUnavailableException $e) {
     Http::json(502, ['error' => $e->getMessage()]);
 } catch (\Throwable $e) {
