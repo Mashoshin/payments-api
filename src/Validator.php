@@ -13,6 +13,7 @@ namespace Payments;
 final class Validator
 {
     private const ACCOUNT_PATTERN = '/^acc_[a-z0-9_]+$/';
+    private const CLIENT_OID_PATTERN = '/^[A-Za-z0-9_-]{1,64}$/';
 
     /**
      * Проверить идентификатор счёта.
@@ -39,6 +40,19 @@ final class Validator
         }
         if ($value <= 0) {
             throw new ValidationException('amount must be greater than zero');
+        }
+
+        return $value;
+    }
+
+    /**
+     * Проверить клиентский ключ идемпотентности: непустая строка
+     * по маске ^[A-Za-z0-9_-]{1,64}$.
+     */
+    public static function clientOid(mixed $value): string
+    {
+        if (!is_string($value) || preg_match(self::CLIENT_OID_PATTERN, $value) !== 1) {
+            throw new ValidationException('client_oid must match ^[A-Za-z0-9_-]{1,64}$');
         }
 
         return $value;
